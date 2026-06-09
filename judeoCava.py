@@ -1,7 +1,16 @@
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-TOKEN = "8872348788:AAFeVqYe9x2KH_7XVGdJ-ff4IRqTL_srV5E"  # ← Reemplaza con tu token
+# ← AGREGAR ESTAS 2 LÍNEAS ↓
+from keep_alive import keep_alive
+keep_alive()  # Inicia el servidor Flask
+# ↑ ←
+
+TOKEN = os.environ.get('TOKEN')
+
+if not TOKEN:
+    raise ValueError("TOKEN no está configurado.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("¡Hola! Soy JudeoCava. Como te puedo ayudar hoy.")
