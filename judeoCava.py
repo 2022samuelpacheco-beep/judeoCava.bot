@@ -1,16 +1,14 @@
 import os
 import requests
 import yfinance as yf
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from keep_alive import keep_alive
 
 # Obtener token de variables de entorno
 TOKEN = os.environ.get('TOKEN')
-ALPHA_KEY = os.environ.get('ALPHA_VANTAGE_KEY')
+ALPHA_KEY = os.environ.get('ALPHA_VANTAGE_KEY')  # Opcional, pero recomendado
 
 if not TOKEN:
     raise ValueError("TOKEN no está configurado. Agrega TOKEN en Render.")
@@ -19,11 +17,15 @@ if not TOKEN:
 keep_alive()
 
 # ============================================================================
-# FUNCIÓN 1: OBTENER PRECIO DE CRIPTOMONEDAS (CoinGecko)
+# FUNCIÓN 1: OBTENER PRECIO DE CRIPTOMONEDAS (CoinGecko - Gratis, ilimitado)
 # ============================================================================
 
 async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando: /crypto bitcoin"""
+    """
+    Comando: /crypto [nombre]
+    Ejemplo: /crypto bitcoin
+    Obtiene: Precio, Market Cap, Volumen 24h en tiempo real
+    """
     try:
         if not context.args:
             mensaje = (
@@ -32,12 +34,16 @@ async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "*Ejemplos:*\n"
                 "`/crypto bitcoin`\n"
                 "`/crypto ethereum`\n"
-                "`/crypto dogecoin`"
+                "`/crypto dogecoin`\n"
+                "`/crypto cardano`\n\n"
+                "_Datos en tiempo real de CoinGecko_"
             )
             await update.message.reply_text(mensaje, parse_mode='Markdown')
             return
         
         cripto_nombre = ' '.join(context.args).lower()
+        
+        # URL de CoinGecko API
         url = "https://api.coingecko.com/api/v3/simple/price"
         
         params = {
@@ -48,77 +54,215 @@ async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'include_24hr_change': 'true'
         }
         
+        # Hacer solicitud
         response = requests.get(url, params=params, timeout=5)
         response.raise_for_status()
         datos = response.json()
         
+        # Verificar si existe la criptomoneda
         if cripto_nombre not in datos:
-            await update.message.reply_text(f"❌ No encontré *{cripto_nombre}*")
+            await update.message.reply_text(
+                f"❌ No encontré *{cripto_nombre}*\n\n"
+                "Intenta con: bitcoin, ethereum, dogecoin, cardano, solana, ripple",
+                parse_mode='Markdown'
+            )
             return
         
+        # Extraer datos
         cripto_data = datos[cripto_nombre]
         precio = cripto_data['usd']
         market_cap = cripto_data['usd_market_cap']
         volumen = cripto_data['usd_24h_vol']
         cambio_24h = cripto_data['usd_24h_change']
         
+        # Formatear números
+        precio_fmt = f"${precio:,.2f}"
+        market_cap_fmt = f"${market_cap:,.0f}" if market_cap else "N/A"
+        volumen_fmt = f"${volumen:,.0f}" if volumen else "N/A"
+        cambio_fmt = f"{cambio_24h:+.2f}%" if cambio_24h else "N/A"
+        
+        # Emoji según cambio
         emoji_cambio = "📈" if cambio_24h >= 0 else "📉"
         
+        # Crear mensaje formateado
         mensaje = f"""
 💰 *{cripto_nombre.upper()}*
 ━━━━━━━━━━━━━━━━━━━━━━━━
-💵 Precio: ${precio:,.2f}
-{emoji_cambio} Cambio 24h: {cambio_24h:+.2f}%
-📊 Market Cap: ${market_cap:,.0f}
-🔄 Volumen 24h: ${volumen:,.0f}
+💵 Precio: {precio_fmt}
+{emoji_cambio} Cambio 24h: {cambio_fmt}
+📊 Market Cap: {market_cap_fmt}
+🔄 Volumen 24h: {volumen_fmt}
 ━━━━━━━━━━━━━━━━━━━━━━━━
+_Datos de CoinGecko • {datetime.now().strftime('%H:%M:%S')}_
         """
         
         await update.message.reply_text(mensaje, parse_mode='Markdown')
     
+    except requests.exceptions.Timeout:
+        await update.message.reply_text("⏱️ Tiempo agotado. Intenta de nuevo.")
+    except requests.exceptions.RequestException as e:
+        await update.message.reply_text(f"❌ Error de conexión: {str(e)}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ============================================================================
-# FUNCIÓN 2: OBTENER PRECIO DE ACCIONES (Yahoo Finance)
+# FUNCIÓN 2: OBTENER PRECIO DE ACCIONES (Alpha Vantage)
 # ============================================================================
 
-async def precio_yfinance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando: /yf AAPL"""
+async def precio_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Comando: /stock [símbolo]
+    Ejemplo: /stock AAPL
+    Obtiene: Precio, cambio, volumen
+    Nota: Necesita ALPHA_VANTAGE_KEY en variables de entorno
+    """
     try:
+        if not ALPHA_KEY:
+            await update.message.reply_text(
+                "⚠️ API key de Alpha Vantage no configurada.\n"
+                "Por ahora usa `/yf` para stocks"
+            )
+            return
+        
         if not context.args:
             mensaje = (
-                "📊 *Obtener Precio*\n\n"
-                "Uso: `/yf [símbolo]`\n\n"
+                "📈 *Obtener Precio de Acciones*\n\n"
+                "Uso: `/stock [símbolo]`\n\n"
                 "*Ejemplos:*\n"
-                "`/yf AAPL` - Apple\n"
-                "`/yf BTC-USD` - Bitcoin\n"
-                "`/yf ^GSPC` - S&P 500"
+                "`/stock AAPL` - Apple\n"
+                "`/stock GOOGL` - Google\n"
+                "`/stock MSFT` - Microsoft\n"
+                "`/stock TSLA` - Tesla\n\n"
+                "_Datos de Alpha Vantage_"
             )
             await update.message.reply_text(mensaje, parse_mode='Markdown')
             return
         
         simbolo = context.args[0].upper()
+        
+        # URL de Alpha Vantage
+        url = "https://www.alphavantage.co/query"
+        
+        params = {
+            'function': 'GLOBAL_QUOTE',
+            'symbol': simbolo,
+            'apikey': ALPHA_KEY
+        }
+        
+        # Hacer solicitud
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        datos = response.json()
+        
+        # Verificar errores
+        if 'Global Quote' not in datos or not datos['Global Quote']:
+            await update.message.reply_text(
+                f"❌ No encontré *{simbolo}*\n\n"
+                "Verifica que el símbolo sea correcto (ej: AAPL, GOOGL)"
+            )
+            return
+        
+        quote = datos['Global Quote']
+        
+        precio = float(quote.get('05. price', 0))
+        cambio = float(quote.get('09. change', 0))
+        cambio_pct = float(quote.get('10. change percent', 0).replace('%', ''))
+        volumen = int(float(quote.get('06. volume', 0)))
+        timestamp = quote.get('07. latest trading day', 'N/A')
+        
+        # Emoji según cambio
+        emoji = "📈" if cambio >= 0 else "📉"
+        
+        # Formatear números
+        precio_fmt = f"${precio:.2f}"
+        cambio_fmt = f"{cambio:+.2f} ({cambio_pct:+.2f}%)"
+        volumen_fmt = f"{volumen:,}"
+        
+        # Crear mensaje
+        mensaje = f"""
+{emoji} *{simbolo}*
+━━━━━━━━━━━━━━━━━━━━━━━━
+💵 Precio: {precio_fmt}
+📊 Cambio: {cambio_fmt}
+🔄 Volumen: {volumen_fmt}
+📅 Fecha: {timestamp}
+━━━━━━━━━━━━━━━━━━━━━━━━
+_Datos de Alpha Vantage_
+        """
+        
+        await update.message.reply_text(mensaje, parse_mode='Markdown')
+    
+    except requests.exceptions.Timeout:
+        await update.message.reply_text("⏱️ Tiempo agotado. Intenta de nuevo.")
+    except requests.exceptions.RequestException as e:
+        await update.message.reply_text(f"❌ Error de conexión: {str(e)}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+# ============================================================================
+# FUNCIÓN 3: OBTENER CUALQUIER PRECIO (Yahoo Finance - Sin API key)
+# ============================================================================
+
+async def precio_yfinance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Comando: /yf [símbolo]
+    Ejemplo: /yf AAPL o /yf BTC-USD
+    Obtiene: Precio, cambio, volumen (funciona con stocks, crypto, índices)
+    """
+    try:
+        if not context.args:
+            mensaje = (
+                "📊 *Obtener Precio (Yahoo Finance)*\n\n"
+                "Uso: `/yf [símbolo]`\n\n"
+                "*Ejemplos:*\n"
+                "Acciones: `/yf AAPL` `/yf TSLA` `/yf GOOGL`\n"
+                "Cripto: `/yf BTC-USD` `/yf ETH-USD`\n"
+                "Índices: `/yf ^GSPC` `/yf ^DJI`\n"
+                "Monedas: `/yf EURUSD=X`\n\n"
+                "_Datos de Yahoo Finance_"
+            )
+            await update.message.reply_text(mensaje, parse_mode='Markdown')
+            return
+        
+        simbolo = context.args[0].upper()
+        
+        # Descargar datos
         stock = yf.Ticker(simbolo)
         info = stock.info
         
+        # Obtener datos
         precio = info.get('currentPrice', None)
-        nombre = info.get('longName', simbolo)
-        cambio = info.get('regularMarketChange', None)
+        precio_anterior = info.get('previousClose', None)
+        cambio = precio - precio_anterior if precio and precio_anterior else None
+        cambio_pct = (cambio / precio_anterior * 100) if cambio and precio_anterior else None
+        
         volumen = info.get('volume', None)
+        nombre = info.get('longName', simbolo)
         
         if not precio:
-            await update.message.reply_text(f"❌ No encontré datos para *{simbolo}*")
+            await update.message.reply_text(
+                f"❌ No encontré datos para *{simbolo}*\n\n"
+                "Verifica el símbolo (ej: AAPL, BTC-USD, ^GSPC)"
+            )
             return
         
+        # Emoji según cambio
         emoji = "📈" if cambio and cambio >= 0 else "📉"
         
+        # Formatear números
+        precio_fmt = f"${precio:.2f}" if precio else "N/A"
+        cambio_fmt = f"{cambio:+.2f} ({cambio_pct:+.2f}%)" if cambio and cambio_pct else "N/A"
+        volumen_fmt = f"{volumen:,}" if volumen else "N/A"
+        
+        # Crear mensaje
         mensaje = f"""
 {emoji} *{nombre}*
 ━━━━━━━━━━━━━━━━━━━━━━━━
-💵 Precio: ${precio:.2f}
-📊 Cambio: {cambio:+.2f}
-🔄 Volumen: {volumen:,}
+💵 Precio: {precio_fmt}
+📊 Cambio: {cambio_fmt}
+🔄 Volumen: {volumen_fmt}
+━━━━━━━━━━━━━━━━━━━━━━━━
+_Datos de Yahoo Finance_
         """
         
         await update.message.reply_text(mensaje, parse_mode='Markdown')
@@ -127,25 +271,36 @@ async def precio_yfinance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ============================================================================
-# FUNCIÓN 3: CONVERTIR MONEDAS
+# FUNCIÓN 4: CONVERTIR ENTRE CRIPTOMONEDAS
 # ============================================================================
 
 async def convertir_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando: /convertir 100 USD EUR"""
+    """
+    Comando: /convertir [cantidad] [de] [a]
+    Ejemplo: /convertir 1 BTC USD o /convertir 100 USD EUR
+    """
     try:
         if len(context.args) < 3:
-            await update.message.reply_text(
-                "💱 Uso: `/convertir [cantidad] [de] [a]`\n"
-                "Ejemplo: `/convertir 100 USD EUR`"
+            mensaje = (
+                "💱 *Conversor de Monedas*\n\n"
+                "Uso: `/convertir [cantidad] [de] [a]`\n\n"
+                "*Ejemplos:*\n"
+                "`/convertir 1 BTC USD`\n"
+                "`/convertir 100 USD EUR`\n"
+                "`/convertir 1 ETH BTC`\n\n"
+                "_Tipos de moneda: USD, EUR, MXN, ARS, BRL, etc._"
             )
+            await update.message.reply_text(mensaje, parse_mode='Markdown')
             return
         
         cantidad = float(context.args[0])
         moneda_de = context.args[1].upper()
         moneda_a = context.args[2].upper()
         
+        # URL de conversión (usando CoinGecko para cripto y otros)
         url = "https://api.coingecko.com/api/v3/simple/price"
         
+        # Intentar con CoinGecko primero
         try:
             params = {
                 'ids': moneda_de.lower(),
@@ -153,6 +308,7 @@ async def convertir_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             
             response = requests.get(url, params=params, timeout=5)
+            response.raise_for_status()
             datos = response.json()
             
             if moneda_de.lower() in datos:
@@ -165,6 +321,7 @@ async def convertir_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💱 *Conversión*
 ━━━━━━━━━━━━━━━━━━━━━━━━
 {cantidad:,.2f} {moneda_de} = {resultado:,.2f} {moneda_a}
+━━━━━━━━━━━━━━━━━━━━━━━━
 _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
                     """
                     
@@ -173,6 +330,7 @@ _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
         except:
             pass
         
+        # Si no funciona con CoinGecko, usar Yahoo Finance
         try:
             par = f"{moneda_de}{moneda_a}=X"
             stock = yf.Ticker(par)
@@ -185,6 +343,7 @@ _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
 💱 *Conversión*
 ━━━━━━━━━━━━━━━━━━━━━━━━
 {cantidad:,.2f} {moneda_de} = {resultado:,.2f} {moneda_a}
+━━━━━━━━━━━━━━━━━━━━━━━━
 _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
                 """
                 
@@ -201,22 +360,27 @@ _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ============================================================================
-# FUNCIÓN 4: COMPARAR DOS ACTIVOS
+# FUNCIÓN 5: COMPARAR DOS ACTIVOS
 # ============================================================================
 
 async def comparar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando: /comparar AAPL GOOGL"""
+    """
+    Comando: /comparar [símbolo1] [símbolo2]
+    Ejemplo: /comparar AAPL GOOGL
+    """
     try:
         if len(context.args) < 2:
             await update.message.reply_text(
                 "Uso: `/comparar [símbolo1] [símbolo2]`\n"
-                "Ejemplo: `/comparar AAPL GOOGL`"
+                "Ejemplo: `/comparar AAPL GOOGL`",
+                parse_mode='Markdown'
             )
             return
         
         sim1 = context.args[0].upper()
         sim2 = context.args[1].upper()
         
+        # Obtener datos de ambos
         stock1 = yf.Ticker(sim1)
         stock2 = yf.Ticker(sim2)
         
@@ -246,251 +410,147 @@ async def comparar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {emoji2} *{nombre2}*
 💵 Precio: ${precio2:.2f}
 📊 Cambio: {cambio2:+.2f}
+━━━━━━━━━━━━━━━━━━━━━━━━
             """
             
             await update.message.reply_text(mensaje, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ No encontré datos para uno de los símbolos")
     
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ============================================================================
-# FUNCIÓN 5: ANÁLISIS PROFESIONAL SIMPLIFICADO
-# ============================================================================
-
-async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando: /analizar AAPL"""
-    try:
-        if not context.args:
-            await update.message.reply_text(
-                "📊 Análisis Profesional\n\n"
-                "Uso: `/analizar [símbolo]`\n"
-                "Ejemplo: `/analizar AAPL`"
-            )
-            return
-        
-        simbolo = context.args[0].upper()
-        await update.message.reply_text(f"🔍 Analizando {simbolo}... espera")
-        
-        # Obtener datos
-        stock = yf.Ticker(simbolo)
-        info = stock.info
-        hist = stock.history(period="1y")
-        
-        if hist.empty:
-            await update.message.reply_text(f"❌ No puedo obtener datos para {simbolo}")
-            return
-        
-        # Datos fundamentales
-        nombre = info.get('longName', simbolo)
-        precio = info.get('currentPrice', 0)
-        market_cap = info.get('marketCap', 0)
-        pe = info.get('trailingPE', 'N/A')
-        forward_pe = info.get('forwardPE', 'N/A')
-        eps = info.get('trailingEps', 'N/A')
-        roe = info.get('returnOnEquity', 'N/A')
-        roa = info.get('returnOnAssets', 'N/A')
-        debt_equity = info.get('debtToEquity', 'N/A')
-        dividend = info.get('dividendYield', 'N/A')
-        sector = info.get('sector', 'N/A')
-        
-        # Calcular indicadores técnicos
-        delta = hist['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        rsi_actual = rsi.iloc[-1]
-        
-        exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
-        signal = macd.ewm(span=9, adjust=False).mean()
-        macd_actual = macd.iloc[-1]
-        signal_actual = signal.iloc[-1]
-        
-        ema20 = hist['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
-        ema50 = hist['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-        ema200 = hist['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-        
-        volatilidad = hist['Close'].pct_change().std() * np.sqrt(252)
-        
-        high_52 = hist['Close'].max()
-        low_52 = hist['Close'].min()
-        
-        # Mensaje 1: Resumen
-        msg1 = f"""
-╔════════════════════════════════╗
-║      📊 {simbolo}
-╚════════════════════════════════╝
-
-**Empresa:** {nombre}
-**Sector:** {sector}
-
-💰 Precio: ${precio:.2f}
-📈 Market Cap: ${market_cap/1e9:.2f}B
-
-_(1/3) Procesando análisis..._
-        """
-        
-        await update.message.reply_text(msg1, parse_mode='Markdown')
-        
-        # Mensaje 2: Fundamental
-        pe_interpretacion = "Valuación BAJA" if (pe != 'N/A' and pe < 15) else "Valuación NORMAL" if (pe != 'N/A' and pe < 25) else "Valuación ALTA"
-        roe_interpretacion = "EXCELENTE (>15%)" if (roe != 'N/A' and roe > 0.15) else "BUENO (>10%)" if (roe != 'N/A' and roe > 0.10) else "PROMEDIO"
-        
-        msg2 = f"""
-╔════════════════════════════════╗
-║    📊 ANÁLISIS FUNDAMENTAL
-╚════════════════════════════════╝
-
-**P/E Ratio:** {pe if pe != 'N/A' else 'N/A'}
-→ {pe_interpretacion}
-
-**Forward P/E:** {forward_pe if forward_pe != 'N/A' else 'N/A'}
-
-**EPS:** ${eps if eps != 'N/A' else 'N/A'}
-
-**ROE (Retorno):** {f'{roe*100:.2f}%' if roe != 'N/A' else 'N/A'}
-→ {roe_interpretacion}
-
-**ROA:** {f'{roa*100:.2f}%' if roa != 'N/A' else 'N/A'}
-
-**Debt/Equity:** {debt_equity if debt_equity != 'N/A' else 'N/A'}
-
-**Dividend Yield:** {f'{dividend*100:.2f}%' if dividend != 'N/A' else 'N/A'}
-
-_(2/3) Análisis técnico..._
-        """
-        
-        await update.message.reply_text(msg2, parse_mode='Markdown')
-        
-        # Mensaje 3: Técnico y conclusión
-        rsi_estado = "SOBREVENTA" if rsi_actual < 30 else "SOBRECOMPRA" if rsi_actual > 70 else "NEUTRAL"
-        macd_estado = "ALCISTA" if macd_actual > signal_actual else "BAJISTA"
-        tendencia = "ALCISTA" if precio > ema200 else "BAJISTA"
-        
-        riesgos = []
-        fortalezas = []
-        
-        if pe != 'N/A' and pe > 30:
-            riesgos.append("⚠️ Valuación elevada")
-        if rsi_actual > 70:
-            riesgos.append("⚠️ Posible corrección (RSI)")
-        if debt_equity != 'N/A' and debt_equity > 2:
-            riesgos.append("⚠️ Alto endeudamiento")
-        
-        if roe != 'N/A' and roe > 0.15:
-            fortalezas.append("✅ Excelente ROE")
-        if macd_actual > signal_actual:
-            fortalezas.append("✅ Momentum positivo")
-        if precio > ema200:
-            fortalezas.append("✅ Tendencia alcista")
-        
-        riesgos_txt = "\n".join(riesgos) if riesgos else "⚠️ Pocos riesgos detectados"
-        fortalezas_txt = "\n".join(fortalezas) if fortalezas else "✅ Características normales"
-        
-        msg3 = f"""
-╔════════════════════════════════╗
-║    📈 ANÁLISIS TÉCNICO
-╚════════════════════════════════╝
-
-**RSI:** {rsi_actual:.2f} → {rsi_estado}
-**MACD:** {macd_estado}
-**Tendencia:** {tendencia}
-
-**EMAs:**
-├ EMA20: ${ema20:.2f}
-├ EMA50: ${ema50:.2f}
-└ EMA200: ${ema200:.2f}
-
-**52 Semanas:**
-├ Alto: ${high_52:.2f}
-└ Bajo: ${low_52:.2f}
-
-**Volatilidad:** {volatilidad*100:.2f}%
-
-╔════════════════════════════════╗
-║    🎯 CONCLUSIÓN
-╚════════════════════════════════╝
-
-**FORTALEZAS:**
-{fortalezas_txt}
-
-**RIESGOS:**
-{riesgos_txt}
-
-**Resumen:** {nombre} muestra señales {('alcistas' if precio > ema200 and macd_actual > signal_actual else 'bajistas' if precio < ema200 and macd_actual < signal_actual else 'mixtas')}.
-
-⚖️ _Este análisis es educativo. No es recomendación de inversión._
-
-_(3/3) Análisis completado ✓_
-        """
-        
-        await update.message.reply_text(msg3, parse_mode='Markdown')
-    
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-# ============================================================================
-# FUNCIÓN MENÚ PRINCIPAL
+# FUNCIÓN 6: MENÚ PRINCIPAL
 # ============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menú principal"""
+    """Menú principal del bot"""
     
     nombre = update.effective_user.first_name
     
     mensaje = f"""
 👋 *¡Hola {nombre}!*
 
-Soy tu bot financiero profesional 📊
+Soy tu bot de información financiera en tiempo real.
 
-*💰 Comandos:*
+*📊 Comandos Disponibles:*
 
-`/crypto [nombre]` - Criptomonedas
-`/yf [símbolo]` - Precio de activos
-`/convertir [cant] [de] [a]` - Convertir monedas
-`/comparar [sim1] [sim2]` - Comparar activos
-`/analizar [símbolo]` - Análisis profesional ⭐
-`/ayuda` - Ver más
+💰 *Criptomonedas:*
+`/crypto [nombre]` - Obtener precio (ej: /crypto bitcoin)
 
-_Datos en tiempo real de Yahoo Finance_
-    """
-    
-    await update.message.reply_text(mensaje, parse_mode='Markdown')
+📈 *Acciones:*
+`/stock [símbolo]` - Precio de acciones (ej: /stock AAPL)
+`/yf [símbolo]` - Cualquier activo (ej: /yf TSLA)
 
-async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostrar ayuda"""
-    
-    mensaje = """
-*📚 AYUDA*
+💱 *Conversión:*
+`/convertir [cantidad] [de] [a]` - Convertir monedas (ej: /convertir 100 USD EUR)
 
-`/crypto bitcoin` - Precio criptomonedas
-`/yf AAPL` - Cualquier activo
-`/yf BTC-USD` - Bitcoin
-`/yf ^GSPC` - S&P 500
-`/convertir 100 USD EUR` - Conversiones
-`/comparar AAPL GOOGL` - Comparar
-`/analizar AAPL` - Análisis profesional
+⚖️ *Comparación:*
+`/comparar [símbolo1] [símbolo2]` - Comparar dos activos (ej: /comparar AAPL GOOGL)
 
-*Todas las APIs son GRATUITAS*
+*Fuentes:*
+🔹 CoinGecko - Criptomonedas
+🔹 Alpha Vantage - Stocks (opcional)
+🔹 Yahoo Finance - General
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+_Todos los datos en tiempo real_
     """
     
     await update.message.reply_text(mensaje, parse_mode='Markdown')
 
 # ============================================================================
-# PROCESAR MENSAJES
+# FUNCIÓN 7: AYUDA
+# ============================================================================
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostrar ayuda detallada"""
+    
+    mensaje = """
+*📚 AYUDA COMPLETA*
+
+*1. Criptomonedas con CoinGecko (GRATIS, ILIMITADO)*
+Comando: `/crypto [nombre]`
+Ejemplos:
+  `/crypto bitcoin` - Bitcoin
+  `/crypto ethereum` - Ethereum
+  `/crypto dogecoin` - Dogecoin
+  `/crypto cardano` - Cardano
+
+Retorna: Precio, Market Cap, Volumen 24h, Cambio 24h
+
+*2. Acciones con Alpha Vantage (GRATIS LIMITADO)*
+Comando: `/stock [símbolo]`
+Ejemplos:
+  `/stock AAPL` - Apple
+  `/stock GOOGL` - Google
+  `/stock MSFT` - Microsoft
+  `/stock TSLA` - Tesla
+
+Retorna: Precio, Cambio, Volumen
+
+*3. Cualquier Activo con Yahoo Finance (GRATIS)*
+Comando: `/yf [símbolo]`
+Ejemplos:
+  `/yf AAPL` - Acciones
+  `/yf BTC-USD` - Bitcoin
+  `/yf ^GSPC` - Índice S&P 500
+  `/yf EURUSD=X` - Tipo de cambio EUR/USD
+
+*4. Convertir Monedas*
+Comando: `/convertir [cantidad] [de] [a]`
+Ejemplo: `/convertir 100 USD EUR`
+
+*5. Comparar Activos*
+Comando: `/comparar [símbolo1] [símbolo2]`
+Ejemplo: `/comparar AAPL GOOGL`
+
+*⚡ Tips:*
+• Los datos se obtienen en tiempo real
+• Escribe exactamente el símbolo o nombre
+• Para criptos, usa el nombre completo (bitcoin, ethereum)
+• Para stocks, usa el símbolo (AAPL, GOOGL, MSFT)
+    """
+    
+    await update.message.reply_text(mensaje, parse_mode='Markdown')
+
+# ============================================================================
+# FUNCIÓN 8: PROCESAR MENSAJES NORMALES
 # ============================================================================
 
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Procesar mensajes normales"""
+    """Procesar mensajes que no son comandos"""
     
-    await update.message.reply_text(
-        "🤖 No entiendo. Usa `/start` para ver comandos"
-    )
+    texto = update.message.text.lower()
+    
+    if "precio" in texto or "cuánto" in texto or "costo" in texto:
+        await update.message.reply_text(
+            "💰 Para obtener precios, usa:\n"
+            "`/crypto` para criptomonedas\n"
+            "`/yf` para cualquier activo",
+            parse_mode='Markdown'
+        )
+    elif "bitcoin" in texto or "ethereum" in texto or "cripto" in texto:
+        await update.message.reply_text(
+            "💰 Usa `/crypto [nombre]` para obtener el precio\n"
+            "Ejemplo: `/crypto bitcoin`",
+            parse_mode='Markdown'
+        )
+    elif "stock" in texto or "acción" in texto:
+        await update.message.reply_text(
+            "📈 Usa `/yf [símbolo]` para obtener el precio\n"
+            "Ejemplo: `/yf AAPL`",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "🤖 No entiendo ese comando.\n"
+            "Usa `/start` para ver los comandos disponibles"
+        )
 
 # ============================================================================
-# FUNCIÓN MAIN
+# FUNCIÓN PRINCIPAL
 # ============================================================================
 
 def main():
@@ -502,19 +562,20 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ayuda", ayuda))
     app.add_handler(CommandHandler("crypto", precio_crypto))
+    app.add_handler(CommandHandler("stock", precio_stock))
     app.add_handler(CommandHandler("yf", precio_yfinance))
     app.add_handler(CommandHandler("convertir", convertir_crypto))
     app.add_handler(CommandHandler("comparar", comparar))
-    app.add_handler(CommandHandler("analizar", analizar))
     
     # Procesar mensajes normales
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje))
     
-    print("✓ Bot iniciado - Todos los comandos listos")
-    print("✓ /crypto /yf /convertir /comparar /analizar")
-    print("✓ Disponible 24/7")
+    print("✓ Bot iniciado con APIs financieras en tiempo real")
+    print("✓ Conectado a: CoinGecko, Alpha Vantage, Yahoo Finance")
+    print("✓ Disponible en Telegram 24/7")
     
     app.run_polling()
 
 if __name__ == '__main__':
     main()
+
