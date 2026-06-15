@@ -3,23 +3,51 @@ import requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from keep_alive import keep_alive
 
-# Obtener token de variables de entorno
 TOKEN = os.environ.get('TOKEN')
 ALPHA_KEY = os.environ.get('ALPHA_VANTAGE_KEY')
 
 if not TOKEN:
-    raise ValueError("TOKEN no está configurado. Agrega TOKEN en Render.")
+    raise ValueError("TOKEN no está configurado.")
 
-# Iniciar servidor para mantener activo
 keep_alive()
 
 # ============================================================================
-# FUNCIÓN 1: OBTENER PRECIO DE CRIPTOMONEDAS (CoinGecko)
+# FUNCIÓN: REINTENTAR CON DELAY (Para evitar Rate Limiting)
+# ============================================================================
+
+def obtener_con_reintentos(ticker, intentos=3, delay=2):
+    """
+    Obtiene datos de Yahoo Finance con reintentos y delays
+    Evita rate limiting esperando entre intentos
+    """
+    for intento in range(intentos):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            # Si obtuvimos datos, retornar
+            if info:
+                return stock, info
+        
+        except Exception as e:
+            if "Too Many Requests" in str(e) or "Rate" in str(e):
+                if intento < intentos - 1:
+                    # Esperar antes de reintentar (backoff exponencial)
+                    espera = delay * (2 ** intento)
+                    time.sleep(espera)
+                    continue
+            raise
+    
+    return None, None
+
+# ============================================================================
+# FUNCIÓN 1: OBTENER PRECIO DE CRIPTOMONEDAS (CoinGecko - Sin Rate Limit)
 # ============================================================================
 
 async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -48,6 +76,7 @@ async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'include_24hr_change': 'true'
         }
         
+        # CoinGecko no tiene rate limit, así que sin delay
         response = requests.get(url, params=params, timeout=5)
         response.raise_for_status()
         datos = response.json()
@@ -71,7 +100,6 @@ async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {emoji_cambio} Cambio 24h: {cambio_24h:+.2f}%
 📊 Market Cap: ${market_cap:,.0f}
 🔄 Volumen 24h: ${volumen:,.0f}
-━━━━━━━━━━━━━━━━━━━━━━━━
         """
         
         await update.message.reply_text(mensaje, parse_mode='Markdown')
@@ -80,7 +108,7 @@ async def precio_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 # ============================================================================
-# FUNCIÓN 2: OBTENER PRECIO DE ACCIONES (Yahoo Finance)
+# FUNCIÓN 2: OBTENER PRECIO CON REINTENTOS (Yahoo Finance)
 # ============================================================================
 
 async def precio_yfinance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -91,16 +119,27 @@ async def precio_yfinance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📊 *Obtener Precio*\n\n"
                 "Uso: `/yf [símbolo]`\n\n"
                 "*Ejemplos:*\n"
-                "`/yf AAPL` - Apple\n"
-                "`/yf BTC-USD` - Bitcoin\n"
-                "`/yf ^GSPC` - S&P 500"
+                "`/yf AAPL`\n"
+                "`/yf BTC-USD`\n"
+                "`/yf ^GSPC`"
             )
             await update.message.reply_text(mensaje, parse_mode='Markdown')
             return
         
         simbolo = context.args[0].upper()
-        stock = yf.Ticker(simbolo)
-        info = stock.info
+        
+        # Mostrar que está procesando
+        await update.message.reply_text(f"⏳ Obteniendo datos de {simbolo}...")
+        
+        # Obtener con reintentos
+        stock, info = obtener_con_reintentos(simbolo)
+        
+        if not stock or not info:
+            await update.message.reply_text(
+                f"❌ No puedo obtener datos para *{simbolo}*\n\n"
+                "_Intenta de nuevo en unos segundos_"
+            )
+            return
         
         precio = info.get('currentPrice', None)
         nombre = info.get('longName', simbolo)
@@ -124,7 +163,10 @@ async def precio_yfinance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(mensaje, parse_mode='Markdown')
     
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(
+            f"⚠️ Error al obtener datos\n\n"
+            f"_Intenta de nuevo en unos segundos_"
+        )
 
 # ============================================================================
 # FUNCIÓN 3: CONVERTIR MONEDAS
@@ -144,6 +186,7 @@ async def convertir_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         moneda_de = context.args[1].upper()
         moneda_a = context.args[2].upper()
         
+        # Primero intentar con CoinGecko (sin rate limit)
         url = "https://api.coingecko.com/api/v3/simple/price"
         
         try:
@@ -173,32 +216,40 @@ _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
         except:
             pass
         
+        # Si falla, intentar con Yahoo Finance (CON reintentos)
         try:
-            par = f"{moneda_de}{moneda_a}=X"
-            stock = yf.Ticker(par)
-            tasa = stock.info.get('currentPrice')
+            await update.message.reply_text(f"⏳ Buscando tasa de cambio...")
             
-            if tasa:
-                resultado = cantidad * tasa
+            par = f"{moneda_de}{moneda_a}=X"
+            stock, info = obtener_con_reintentos(par)
+            
+            if stock and info:
+                tasa = info.get('currentPrice')
                 
-                mensaje = f"""
+                if tasa:
+                    resultado = cantidad * tasa
+                    
+                    mensaje = f"""
 💱 *Conversión*
 ━━━━━━━━━━━━━━━━━━━━━━━━
 {cantidad:,.2f} {moneda_de} = {resultado:,.2f} {moneda_a}
 _Tasa: 1 {moneda_de} = {tasa:,.2f} {moneda_a}_
                 """
-                
-                await update.message.reply_text(mensaje, parse_mode='Markdown')
-                return
+                    
+                    await update.message.reply_text(mensaje, parse_mode='Markdown')
+                    return
         except:
             pass
         
-        await update.message.reply_text(f"❌ No puedo convertir {moneda_de} a {moneda_a}")
+        await update.message.reply_text(
+            f"❌ No puedo convertir {moneda_de} a {moneda_a}\n\n"
+            "_Intenta de nuevo en unos segundos_"
+        )
     
     except ValueError:
         await update.message.reply_text("❌ El primer argumento debe ser un número")
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text("⚠️ Error al procesar la conversión")
 
 # ============================================================================
 # FUNCIÓN 4: COMPARAR DOS ACTIVOS
@@ -217,11 +268,19 @@ async def comparar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sim1 = context.args[0].upper()
         sim2 = context.args[1].upper()
         
-        stock1 = yf.Ticker(sim1)
-        stock2 = yf.Ticker(sim2)
+        await update.message.reply_text(f"⏳ Obteniendo datos...")
         
-        info1 = stock1.info
-        info2 = stock2.info
+        # Obtener datos con reintentos
+        stock1, info1 = obtener_con_reintentos(sim1)
+        
+        # Esperar un poco entre peticiones
+        time.sleep(1)
+        
+        stock2, info2 = obtener_con_reintentos(sim2)
+        
+        if not (stock1 and info1 and stock2 and info2):
+            await update.message.reply_text("❌ No puedo obtener los datos")
+            return
         
         precio1 = info1.get('currentPrice', 0)
         precio2 = info2.get('currentPrice', 0)
@@ -249,12 +308,14 @@ async def comparar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
             
             await update.message.reply_text(mensaje, parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ No puedo obtener los datos")
     
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text("⚠️ Error al comparar")
 
 # ============================================================================
-# FUNCIÓN 5: ANÁLISIS PROFESIONAL SIMPLIFICADO
+# FUNCIÓN 5: ANÁLISIS PROFESIONAL (CON MANEJO DE RATE LIMIT)
 # ============================================================================
 
 async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -271,13 +332,25 @@ async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         simbolo = context.args[0].upper()
         await update.message.reply_text(f"🔍 Analizando {simbolo}... espera")
         
-        # Obtener datos
-        stock = yf.Ticker(simbolo)
-        info = stock.info
-        hist = stock.history(period="1y")
+        # Obtener datos con reintentos
+        stock, info = obtener_con_reintentos(simbolo)
+        
+        if not stock or not info:
+            await update.message.reply_text(
+                f"❌ No puedo obtener datos para {simbolo}\n\n"
+                "_Intenta de nuevo en 30 segundos_"
+            )
+            return
+        
+        # Obtener histórico con reintentos
+        try:
+            hist = stock.history(period="1y")
+        except:
+            time.sleep(2)
+            hist = stock.history(period="1y")
         
         if hist.empty:
-            await update.message.reply_text(f"❌ No puedo obtener datos para {simbolo}")
+            await update.message.reply_text(f"❌ No hay datos históricos para {simbolo}")
             return
         
         # Datos fundamentales
@@ -421,7 +494,7 @@ _(2/3) Análisis técnico..._
 
 **Resumen:** {nombre} muestra señales {('alcistas' if precio > ema200 and macd_actual > signal_actual else 'bajistas' if precio < ema200 and macd_actual < signal_actual else 'mixtas')}.
 
-⚖️ _Este análisis es educativo. No es recomendación de inversión._
+⚖️ _Este análisis es educativo. No es recomendación._
 
 _(3/3) Análisis completado ✓_
         """
@@ -429,10 +502,13 @@ _(3/3) Análisis completado ✓_
         await update.message.reply_text(msg3, parse_mode='Markdown')
     
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(
+            f"⚠️ Error al analizar\n\n"
+            f"_Intenta de nuevo en 30 segundos_"
+        )
 
 # ============================================================================
-# FUNCIÓN MENÚ PRINCIPAL
+# FUNCIONES MENÚ
 # ============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,7 +530,7 @@ Soy tu bot financiero profesional 📊
 `/analizar [símbolo]` - Análisis profesional ⭐
 `/ayuda` - Ver más
 
-_Datos en tiempo real de Yahoo Finance_
+_Datos en tiempo real | Rate Limit Manejado_
     """
     
     await update.message.reply_text(mensaje, parse_mode='Markdown')
@@ -473,14 +549,12 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 `/comparar AAPL GOOGL` - Comparar
 `/analizar AAPL` - Análisis profesional
 
+⚠️ *Nota:* Si ves "rate limited", espera 30 segundos
+
 *Todas las APIs son GRATUITAS*
     """
     
     await update.message.reply_text(mensaje, parse_mode='Markdown')
-
-# ============================================================================
-# PROCESAR MENSAJES
-# ============================================================================
 
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Procesar mensajes normales"""
@@ -510,9 +584,8 @@ def main():
     # Procesar mensajes normales
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje))
     
-    print("✓ Bot iniciado - Todos los comandos listos")
-    print("✓ /crypto /yf /convertir /comparar /analizar")
-    print("✓ Disponible 24/7")
+    print("✓ Bot iniciado - Rate Limiting Manejado")
+    print("✓ Todos los comandos listos")
     
     app.run_polling()
 
