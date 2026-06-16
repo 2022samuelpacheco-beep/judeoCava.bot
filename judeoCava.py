@@ -319,4 +319,16 @@ async def main():
 
 if __name__ == '__main__':
     import asyncio
-    asyncio.run(main())
+    
+    # NO usar asyncio.run() porque keep_alive() ya tiene event loop
+    # En su lugar, obtener el event loop actual
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
