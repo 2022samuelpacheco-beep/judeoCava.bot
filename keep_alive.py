@@ -5,13 +5,15 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return 'Bot is alive!', 200
+    return 'Bot is alive! 🤖', 200
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    """Ejecutar servidor Flask"""
+    app.run(host='0.0.0.0', port=8080, debug=False)
 
 def keep_alive():
-    """Inicia un servidor Flask en background para mantener el servicio activo"""
+    """Iniciar servidor en thread daemon"""
     thread = threading.Thread(target=run)
     thread.daemon = True
     thread.start()
+    print("✓ Keep-Alive server iniciado en puerto 8080")
