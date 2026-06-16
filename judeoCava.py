@@ -1,4 +1,5 @@
 import os
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from database import Database
@@ -11,8 +12,6 @@ FMP_KEY = os.getenv("FMP_KEY")
 
 if not TOKEN or not FMP_KEY:
     raise ValueError("TOKEN o FMP_KEY no configurados")
-
-keep_alive()
 
 # ============================================================================
 # COMANDOS DEL BOT
@@ -32,15 +31,13 @@ Soy tu asistente financiero profesional 📊
 
 `/analizar [SÍMBOLO]` - Análisis completo (ej: /analizar AAPL)
 `/comparar [SIM1] [SIM2]` - Comparar dos activos
-`/watchlist` - Ver tu lista de vigilancia
-`/cartera` - Ver tu cartera
-`/noticias [SÍMBOLO]` - Últimas noticias
+`/ayuda` - Ver ayuda
 
 *📈 Activos que analizo:*
 • Acciones: AAPL, MSFT, INTC, TSLA, etc
-• ETFs: VOO, QQQ, SCHD, ACWI, IVV, ZTS
+• ETFs: VOO, QQQ, SCHD, ACWI, IVV
 
-_Análisis con FMP, Finnhub y cálculos locales_
+_Análisis con FMP, datos en tiempo real_
     """
     
     await update.message.reply_text(mensaje, parse_mode='Markdown')
@@ -196,7 +193,6 @@ _Relación SMA50 vs SMA200_
 
 **Conclusión:**
 {nombre_empresa} muestra señales {'alcistas' if trend == 'ALCISTA' else 'bajistas'} técnicas.
-Fundamentalmente, tiene {'valuación atractiva' if pe != 'N/A' and pe < 20 else 'valuación normal' if pe != 'N/A' else 'data incompleta'}.
 
 ⚖️ _Este análisis es educativo. No constituye asesoramiento financiero._
 
@@ -267,14 +263,11 @@ async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 `/analizar AAPL` - Análisis completo
 `/comparar AAPL MSFT` - Comparar activos
-`/watchlist` - Tu lista de vigilancia
-`/cartera` - Tu cartera
-`/noticias AAPL` - Últimas noticias
+`/ayuda` - Esta ayuda
 
 *Próximas características:*
 ✓ Alertas automáticas
-✓ Comparativas más detalladas
-✓ Histórico de análisis
+✓ Watchlist personal
     """
     
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -288,16 +281,16 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============================================================================
-# FUNCIÓN MAIN
+# FUNCIÓN PRINCIPAL (SIN ASYNC)
 # ============================================================================
 
-async def main():
-    """Inicializar el bot"""
+def main():
+    """Inicializar el bot - VERSIÓN SIN ASYNC EN MAIN"""
     
-    # Inicializar base de datos
-    await Database.init()
+    # Inicializar keep_alive PRIMERO
+    keep_alive()
     
-    # Crear aplicación
+    # Crear y configurar aplicación
     app = Application.builder().token(TOKEN).build()
     
     # Registrar comandos
@@ -310,25 +303,16 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje))
     
     print("✓ Bot iniciado")
-    print("✓ Base de datos SQLite lista")
+    print("✓ Keep-Alive activo")
     print("✓ FMP API configurada")
     print("✓ Disponible 24/7 en Render")
     
-    # Iniciar bot
-    await app.run_polling()
+    # Inicializar base de datos
+    asyncio.run(Database.init())
+    
+    # IMPORTANTE: Usar run_polling() sin async/await
+    # Esto evita conflictos con Flask
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    import asyncio
-    
-    # NO usar asyncio.run() porque keep_alive() ya tiene event loop
-    # En su lugar, obtener el event loop actual
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    try:
-        loop.run_until_complete(main())
-    finally:
-        loop.close()
+    main()
