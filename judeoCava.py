@@ -3,55 +3,43 @@ import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from database import Database
-from apis import Yahoo, CoinGecko, is_crypto
+from apis import StockAPI, CoinGecko, is_crypto
 from analytics import TechnicalAnalysis, FundamentalAnalysis, ScoringSystem
 from keep_alive import keep_alive
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
-    raise ValueError("TOKEN no configurado en variables de entorno")
+    raise ValueError("TOKEN no configurado")
 
 # ============================================================================
-# UTILIDADES DE FORMATO
+# FORMATO SEGURO
 # ============================================================================
 
 def fmt_price(val, decimals=2):
-    if val is None:
-        return "N/A"
     try:
         return f"${float(val):,.{decimals}f}"
     except:
         return "N/A"
 
 def fmt_pct(val, multiply=False):
-    if val is None:
-        return "N/A"
     try:
         v = float(val) * 100 if multiply else float(val)
-        sign = "+" if v >= 0 else ""
-        return f"{sign}{v:.2f}%"
+        return f"{'+' if v>=0 else ''}{v:.2f}%"
     except:
         return "N/A"
 
 def fmt_num(val, decimals=2):
-    if val is None:
-        return "N/A"
     try:
         return f"{float(val):,.{decimals}f}"
     except:
         return "N/A"
 
-def fmt_market_cap(val):
-    if val is None:
-        return "N/A"
+def fmt_cap(val):
     try:
         v = float(val)
-        if v >= 1e12:
-            return f"${v/1e12:.2f}T"
-        if v >= 1e9:
-            return f"${v/1e9:.2f}B"
-        if v >= 1e6:
-            return f"${v/1e6:.2f}M"
+        if v >= 1e12: return f"${v/1e12:.2f}T"
+        if v >= 1e9:  return f"${v/1e9:.2f}B"
+        if v >= 1e6:  return f"${v/1e6:.2f}M"
         return f"${v:,.0f}"
     except:
         return "N/A"
@@ -62,135 +50,114 @@ def fmt_market_cap(val):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nombre = update.effective_user.first_name
-    msg = (
-        f"👋 *Hola {nombre}!*\n\n"
-        "Soy tu asistente financiero 📊\n\n"
-        "*Comandos:*\n"
-        "`/analizar AAPL` - Análisis completo\n"
-        "`/precio BTC` - Solo precio\n"
-        "`/comparar AAPL MSFT` - Comparar activos\n"
-        "`/ayuda` - Ayuda\n\n"
-        "*Soporta:*\n"
-        "Acciones: AAPL, MSFT, INTC, TSLA...\n"
-        "ETFs: VOO, QQQ, SCHD...\n"
-        "Cripto: BTC, ETH, SOL, ADA, XRP..."
+    await update.message.reply_text(
+        f"Hola {nombre}! Soy tu asistente financiero\n\n"
+        "/analizar AAPL - Analisis completo\n"
+        "/precio BTC - Precio rapido\n"
+        "/comparar AAPL MSFT - Comparar activos\n"
+        "/ayuda - Ayuda\n\n"
+        "Soporta acciones, ETFs y cripto (BTC, ETH, SOL...)"
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 async def precio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Uso: `/precio AAPL` o `/precio BTC`", parse_mode='Markdown')
+        await update.message.reply_text("Uso: /precio AAPL  o  /precio BTC")
         return
-
     simbolo = context.args[0].upper()
-    msg_espera = await update.message.reply_text(f"Obteniendo precio de {simbolo}...")
-
+    msg = await update.message.reply_text(f"Buscando precio de {simbolo}...")
     try:
-        quote = await CoinGecko.get_quote(simbolo) if is_crypto(simbolo) else await Yahoo.get_quote(simbolo)
+        if is_crypto(simbolo):
+            q = await CoinGecko.get_quote(simbolo)
+        else:
+            data = await StockAPI.get_all(simbolo)
+            q = data.get("quote")
 
-        if not quote or not quote.get("price"):
-            await msg_espera.edit_text(
-                f"No encontre datos para *{simbolo}*\n"
-                "Verifica que el simbolo sea correcto.",
-                parse_mode='Markdown'
-            )
+        if not q or not q.get("price"):
+            await msg.edit_text(f"No encontre datos para {simbolo}")
             return
-
-        change = quote.get("changePercent", 0) or 0
-        emoji = "📈" if change >= 0 else "📉"
-
-        await msg_espera.edit_text(
-            f"{emoji} *{quote.get('name', simbolo)}* (`{simbolo}`)\n\n"
-            f"Precio: *{fmt_price(quote['price'])}*\n"
-            f"Cambio 24h: *{fmt_pct(change)}*",
-            parse_mode='Markdown'
+        change = q.get("changePercent") or 0
+        e = "subio" if change >= 0 else "bajo"
+        await msg.edit_text(
+            f"{q.get('name', simbolo)} ({simbolo})\n\n"
+            f"Precio: {fmt_price(q['price'])}\n"
+            f"Hoy {e}: {fmt_pct(change)}"
         )
-    except Exception as e:
-        print(f"Error /precio {simbolo}: {e}")
-        await msg_espera.edit_text(f"Error obteniendo precio de {simbolo}")
+    except Exception as ex:
+        print(f"Error /precio: {ex}")
+        await msg.edit_text(f"Error obteniendo {simbolo}")
 
 
 async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
-            "Uso: `/analizar SIMBOLO`\nEjemplos: `/analizar AAPL` o `/analizar BTC`",
-            parse_mode='Markdown'
+            "Uso: /analizar SIMBOLO\nEj: /analizar AAPL  o  /analizar BTC"
         )
         return
 
     simbolo = context.args[0].upper()
-
-    # IMPORTANTE: mensaje inicial SIN parse_mode para evitar errores de formato
-    msg_espera = await update.message.reply_text(
-        f"Analizando {simbolo}... por favor espera"
-    )
+    msg = await update.message.reply_text(f"Analizando {simbolo}, por favor espera...")
 
     try:
-        # ── Obtener datos ────────────────────────────────────────────────────
+        # ── Obtener datos ─────────────────────────────────────────────────────
         if is_crypto(simbolo):
-            quote = await CoinGecko.get_quote(simbolo)
-            historical_data = await CoinGecko.get_historical_prices(simbolo)
-            profile = None
-            metrics = None
+            q    = await CoinGecko.get_quote(simbolo)
+            hist = await CoinGecko.get_historical(simbolo)
+            profile  = None
+            metrics  = None
         else:
-            quote = await Yahoo.get_quote(simbolo)
-            historical_data = await Yahoo.get_historical_prices(simbolo)
-            profile = await Yahoo.get_company_profile(simbolo)
-            metrics = await Yahoo.get_key_metrics(simbolo)
+            data     = await StockAPI.get_all(simbolo)
+            q        = data.get("quote")
+            profile  = data.get("profile")
+            metrics  = data.get("metrics")
+            hist     = data.get("historical")
 
-        # ── Validar quote ────────────────────────────────────────────────────
-        if not quote or not quote.get("price"):
-            await msg_espera.edit_text(
+        # ── Validar ───────────────────────────────────────────────────────────
+        if not q or not q.get("price"):
+            await msg.edit_text(
                 f"No encontre datos para {simbolo}\n\n"
-                "Posibles causas:\n"
-                "- Simbolo incorrecto\n"
-                "- Para cripto usa: BTC, ETH, SOL, ADA...\n"
-                "- Para acciones usa el ticker exacto: AAPL, MSFT..."
+                "Verifica el simbolo (ej: AAPL, MSFT, BTC)"
             )
             return
 
-        # ── Análisis técnico ─────────────────────────────────────────────────
+        # ── Tecnico ───────────────────────────────────────────────────────────
         technical = None
-        hist_count = 0
-        if historical_data and historical_data.get("historical"):
-            hist = historical_data["historical"]
-            hist_count = len(hist)
-            if hist_count >= 50:
-                technical = TechnicalAnalysis.analyze_technicals(hist)
+        hist_n = len(hist) if hist else 0
+        if hist and hist_n >= 50:
+            technical = TechnicalAnalysis.analyze_technicals(hist)
 
         # ── Fundamental y score ───────────────────────────────────────────────
-        fundamental = FundamentalAnalysis.analyze_fundamentals(metrics or {}, quote)
-        score_data = ScoringSystem.calculate_score(technical or {}, fundamental or {})
+        fundamental = FundamentalAnalysis.analyze_fundamentals(metrics or {}, q)
+        score_data  = ScoringSystem.calculate_score(technical or {}, fundamental or {})
 
         # ── Datos comunes ─────────────────────────────────────────────────────
-        price  = quote.get("price")
-        change = quote.get("changePercent", 0) or 0
-        name   = quote.get("name") or (profile.get("name") if profile else simbolo) or simbolo
-        sector = (profile.get("sector") if profile else None) or "N/A"
-        mktcap = quote.get("marketCap") or (profile.get("marketCap") if profile else None)
-        emoji  = "📈" if change >= 0 else "📉"
+        price  = q.get("price")
+        change = q.get("changePercent") or 0
+        name   = q.get("name") or (profile or {}).get("name") or simbolo
+        sector = (profile or {}).get("sector") or "N/A"
+        mktcap = q.get("marketCap") or (profile or {}).get("marketCap")
+        e      = "sube" if change >= 0 else "baja"
 
-        # ════════════════════════════════════════
-        # MSG 1 — Precio
-        # ════════════════════════════════════════
+        # ════════════════════════
+        # MENSAJE 1 — Precio
+        # ════════════════════════
         sector_line = f"Sector: {sector}\n" if sector != "N/A" else ""
-        msg1 = (
+        m1 = (
             f"ANALISIS: {simbolo}\n"
-            f"{'='*24}\n\n"
+            f"{'='*22}\n\n"
             f"*{name}*\n"
             f"{sector_line}"
             f"\n"
             f"Precio: *{fmt_price(price)}*\n"
-            f"{emoji} Cambio: *{fmt_pct(change)}*\n"
-            f"Market Cap: *{fmt_market_cap(mktcap)}*\n\n"
-            f"_1 de 3 - calculando fundamental..._"
+            f"Hoy {e}: *{fmt_pct(change)}*\n"
+            f"Market Cap: *{fmt_cap(mktcap)}*\n\n"
+            f"_1 de 3 calculando fundamental..._"
         )
-        await msg_espera.edit_text(msg1, parse_mode='Markdown')
+        await msg.edit_text(m1, parse_mode='Markdown')
 
-        # ════════════════════════════════════════
-        # MSG 2 — Fundamental
-        # ════════════════════════════════════════
+        # ════════════════════════
+        # MENSAJE 2 — Fundamental
+        # ════════════════════════
         if not is_crypto(simbolo) and fundamental:
             pe  = fundamental.get("pe_ratio")
             roe = fundamental.get("roe")
@@ -199,177 +166,159 @@ async def analizar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             d2e = fundamental.get("debt_to_equity")
             nm  = fundamental.get("net_margin")
 
-            pe_ico  = "🔴" if pe and pe > 30 else "🟡" if pe and pe >= 15 else "🟢" if pe else "⚪"
-            roe_ico = "🟢" if roe and roe > 0.15 else "🟡" if roe and roe > 0.10 else "🔴" if roe else "⚪"
+            any_data = any(v is not None for v in [pe, roe, div, rev, d2e, nm])
 
-            msg2 = (
-                f"FUNDAMENTAL: {simbolo}\n"
-                f"{'='*24}\n\n"
-                f"{pe_ico} P/E Ratio: *{fmt_num(pe, 1)}*\n"
-                f"{roe_ico} ROE: *{fmt_pct(roe, multiply=True)}*\n"
-                f"Dividend Yield: *{fmt_pct(div, multiply=True)}*\n"
-                f"Revenue Growth: *{fmt_pct(rev, multiply=True)}*\n"
-                f"Debt/Equity: *{fmt_num(d2e)}*\n"
-                f"Net Margin: *{fmt_pct(nm, multiply=True)}*\n\n"
-                f"_2 de 3 - calculando tecnico..._"
-            )
+            if any_data:
+                pe_ico  = ("alto" if pe and pe > 30
+                           else "normal" if pe and pe >= 15
+                           else "bajo" if pe else "sin datos")
+                roe_ico = ("excelente" if roe and roe > 0.15
+                           else "bueno" if roe and roe > 0.10
+                           else "bajo" if roe else "sin datos")
+
+                m2 = (
+                    f"FUNDAMENTAL: {simbolo}\n"
+                    f"{'='*22}\n\n"
+                    f"P/E Ratio: *{fmt_num(pe, 1)}* ({pe_ico})\n"
+                    f"ROE: *{fmt_pct(roe, multiply=True)}* ({roe_ico})\n"
+                    f"Dividend Yield: *{fmt_pct(div, multiply=True)}*\n"
+                    f"Revenue Growth: *{fmt_pct(rev, multiply=True)}*\n"
+                    f"Debt/Equity: *{fmt_num(d2e)}*\n"
+                    f"Net Margin: *{fmt_pct(nm, multiply=True)}*\n\n"
+                    f"_2 de 3 calculando tecnico..._"
+                )
+            else:
+                m2 = (
+                    f"FUNDAMENTAL: {simbolo}\n"
+                    f"{'='*22}\n\n"
+                    f"Sin datos fundamentales disponibles\n"
+                    f"(intenta de nuevo en unos minutos)\n\n"
+                    f"_2 de 3 calculando tecnico..._"
+                )
         else:
-            msg2 = (
+            m2 = (
                 f"FUNDAMENTAL: {simbolo}\n"
-                f"{'='*24}\n\n"
-                f"⚪ _No disponible para cripto_\n\n"
-                f"_2 de 3 - calculando tecnico..._"
+                f"{'='*22}\n\n"
+                f"No aplica para cripto\n\n"
+                f"_2 de 3 calculando tecnico..._"
             )
+        await update.message.reply_text(m2, parse_mode='Markdown')
 
-        await update.message.reply_text(msg2, parse_mode='Markdown')
-
-        # ════════════════════════════════════════
-        # MSG 3 — Técnico + Score
-        # ════════════════════════════════════════
+        # ════════════════════════
+        # MENSAJE 3 — Tecnico + Score
+        # ════════════════════════
         if technical:
             cp     = technical.get("current_price")
             sma50  = technical.get("sma50")
             sma200 = technical.get("sma200")
             rsi    = technical.get("rsi")
             trend  = technical.get("trend", "NEUTRAL")
+            rsi_v  = float(rsi) if rsi else None
 
-            rsi_v = float(rsi) if rsi else None
-            if rsi_v and rsi_v > 70:
-                rsi_ico = "🔴 SOBRECOMPRA (>70)"
-            elif rsi_v and rsi_v < 30:
-                rsi_ico = "🔴 SOBREVENTA (<30)"
-            elif rsi_v:
-                rsi_ico = "🟢 Normal (30-70)"
-            else:
-                rsi_ico = "⚪ N/A"
-
-            trend_ico = "🟢" if trend == "ALCISTA" else "🔴"
+            rsi_txt = ("SOBRECOMPRA >70" if rsi_v and rsi_v > 70
+                       else "SOBREVENTA <30"  if rsi_v and rsi_v < 30
+                       else "Normal 30-70"    if rsi_v else "N/A")
+            t_ico   = "sube" if trend == "ALCISTA" else "baja"
 
             tech_txt = (
-                f"Precio actual: *{fmt_price(cp)}*\n"
+                f"Precio: *{fmt_price(cp)}*\n"
                 f"SMA 50: *{fmt_price(sma50)}*\n"
                 f"SMA 200: *{fmt_price(sma200)}*\n\n"
-                f"RSI (14): *{fmt_num(rsi, 1)}*\n"
-                f"{rsi_ico}\n\n"
-                f"Tendencia: {trend_ico} *{trend}*\n"
+                f"RSI (14): *{fmt_num(rsi, 1)}* - {rsi_txt}\n\n"
+                f"Tendencia: *{trend}* ({t_ico})\n"
             )
         else:
-            if hist_count > 0:
-                histmsg = f"solo {hist_count} registros, se necesitan 200+"
-            else:
-                histmsg = "sin historial disponible"
-            tech_txt = f"⚪ _Tecnico no disponible ({histmsg})_\n"
+            tech_txt = f"Sin datos tecnicos ({hist_n} dias de historial, minimo 50)\n"
 
         score   = score_data.get("total_score", 0)
-        s_ico   = "🟢" if score >= 70 else "🟡" if score >= 50 else "🔴"
-        details = "\n".join(score_data.get("details", [])) or "_Sin datos suficientes_"
+        s_txt   = "BUENO" if score >= 70 else "REGULAR" if score >= 50 else "BAJO"
+        details = "\n".join(score_data.get("details", [])) or "Sin factores disponibles"
+        concl   = ("alcistas" if technical and technical.get("trend") == "ALCISTA"
+                   else "bajistas" if technical and technical.get("trend") == "BAJISTA"
+                   else "mixtas")
 
-        if technical and technical.get("trend") == "ALCISTA":
-            conclusion = "alcistas"
-        elif technical and technical.get("trend") == "BAJISTA":
-            conclusion = "bajistas"
-        else:
-            conclusion = "mixtas"
-
-        msg3 = (
+        m3 = (
             f"TECNICO + SCORE: {simbolo}\n"
-            f"{'='*24}\n\n"
+            f"{'='*22}\n\n"
             f"{tech_txt}\n"
-            f"PUNTUACION FINAL\n"
-            f"{'='*24}\n\n"
-            f"Score: {s_ico} *{score}/100*\n\n"
-            f"Factores:\n{details}\n\n"
-            f"*{name}* muestra señales {conclusion}.\n\n"
-            f"_Analisis educativo. No es asesoramiento financiero._\n\n"
-            f"_3 de 3 - Completado_"
+            f"PUNTUACION: *{score}/100* ({s_txt})\n"
+            f"{'='*22}\n"
+            f"{details}\n\n"
+            f"Conclusion: *{name}* muestra señales {concl}\n\n"
+            f"_Educativo. No es asesoramiento financiero._\n"
+            f"_3 de 3 completado_"
         )
+        await update.message.reply_text(m3, parse_mode='Markdown')
 
-        await update.message.reply_text(msg3, parse_mode='Markdown')
-
-    except Exception as e:
-        print(f"Error en /analizar {simbolo}: {e}")
+    except Exception as ex:
         import traceback
         traceback.print_exc()
-        await msg_espera.edit_text(f"Error analizando {simbolo}: {str(e)[:150]}")
+        await msg.edit_text(f"Error analizando {simbolo}: {str(ex)[:120]}")
 
 
 async def comparar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "Uso: `/comparar S1 S2`\nEjemplo: `/comparar AAPL MSFT`",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("Uso: /comparar AAPL MSFT")
         return
 
-    sim1, sim2 = context.args[0].upper(), context.args[1].upper()
-    msg_espera = await update.message.reply_text(f"Comparando {sim1} vs {sim2}...")
+    s1, s2 = context.args[0].upper(), context.args[1].upper()
+    msg = await update.message.reply_text(f"Comparando {s1} vs {s2}...")
 
     try:
-        q1 = await (CoinGecko.get_quote(sim1) if is_crypto(sim1) else Yahoo.get_quote(sim1))
-        q2 = await (CoinGecko.get_quote(sim2) if is_crypto(sim2) else Yahoo.get_quote(sim2))
+        async def get_q(sym):
+            if is_crypto(sym):
+                return await CoinGecko.get_quote(sym)
+            return (await StockAPI.get_all(sym)).get("quote")
+
+        q1, q2 = await asyncio.gather(get_q(s1), get_q(s2))
 
         if not q1 or not q1.get("price"):
-            await msg_espera.edit_text(f"No encontre datos para {sim1}")
+            await msg.edit_text(f"No encontre datos para {s1}")
             return
         if not q2 or not q2.get("price"):
-            await msg_espera.edit_text(f"No encontre datos para {sim2}")
+            await msg.edit_text(f"No encontre datos para {s2}")
             return
 
-        c1 = q1.get("changePercent", 0) or 0
-        c2 = q2.get("changePercent", 0) or 0
-        e1 = "📈" if c1 >= 0 else "📉"
-        e2 = "📈" if c2 >= 0 else "📉"
-        ganador = sim1 if c1 > c2 else (sim2 if c2 > c1 else None)
-        winner  = f"\n🏆 *Mejor hoy: {ganador}*" if ganador else "\n🤝 *Rendimiento similar*"
+        c1 = q1.get("changePercent") or 0
+        c2 = q2.get("changePercent") or 0
+        ganador = s1 if c1 > c2 else (s2 if c2 > c1 else None)
+        winner = f"\nGanador de hoy: *{ganador}*" if ganador else "\nRendimiento similar hoy"
 
-        msg = (
-            f"COMPARACION: {sim1} vs {sim2}\n"
-            f"{'='*24}\n\n"
-            f"{e1} *{q1.get('name', sim1)}*\n"
-            f"Precio: *{fmt_price(q1['price'])}*\n"
-            f"Cambio: *{fmt_pct(c1)}*\n"
-            f"Cap: {fmt_market_cap(q1.get('marketCap'))}\n\n"
-            f"{e2} *{q2.get('name', sim2)}*\n"
-            f"Precio: *{fmt_price(q2['price'])}*\n"
-            f"Cambio: *{fmt_pct(c2)}*\n"
-            f"Cap: {fmt_market_cap(q2.get('marketCap'))}"
-            f"{winner}"
+        await msg.edit_text(
+            f"COMPARACION: {s1} vs {s2}\n"
+            f"{'='*22}\n\n"
+            f"*{q1.get('name', s1)}*\n"
+            f"Precio: *{fmt_price(q1['price'])}*  Cambio: *{fmt_pct(c1)}*\n"
+            f"Cap: {fmt_cap(q1.get('marketCap'))}\n\n"
+            f"*{q2.get('name', s2)}*\n"
+            f"Precio: *{fmt_price(q2['price'])}*  Cambio: *{fmt_pct(c2)}*\n"
+            f"Cap: {fmt_cap(q2.get('marketCap'))}"
+            f"{winner}",
+            parse_mode='Markdown'
         )
-        await msg_espera.edit_text(msg, parse_mode='Markdown')
-
-    except Exception as e:
-        print(f"Error /comparar: {e}")
-        await msg_espera.edit_text(f"Error comparando {sim1} vs {sim2}")
+    except Exception as ex:
+        print(f"Error /comparar: {ex}")
+        await msg.edit_text(f"Error comparando {s1} vs {s2}")
 
 
 async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "*AYUDA*\n\n"
-        "`/analizar AAPL` - Analisis completo\n"
-        "`/precio BTC` - Solo precio actual\n"
-        "`/comparar AAPL MSFT` - Comparar dos activos\n\n"
-        "*Cripto soportada:*\n"
-        "BTC, ETH, BNB, SOL, ADA, XRP, DOGE,\n"
-        "DOT, AVAX, MATIC, LTC, LINK, UNI, ATOM\n\n"
-        "*Proximas mejoras:*\n"
-        "Alertas de precio\n"
-        "Watchlist personal"
+    await update.message.reply_text(
+        "AYUDA\n\n"
+        "/analizar AAPL - Analisis completo con tecnico y fundamental\n"
+        "/precio BTC - Solo el precio actual\n"
+        "/comparar AAPL MSFT - Comparar dos activos\n\n"
+        "Cripto: BTC ETH BNB SOL ADA XRP DOGE DOT AVAX LTC LINK UNI ATOM\n\n"
+        "Fuentes: FMP + Alpha Vantage + Finnhub + CoinGecko"
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().upper()
     if len(text) <= 6 and text.isalpha():
-        await update.message.reply_text(
-            f"Para analizar *{text}* usa:\n`/analizar {text}`",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"Para analizar {text} usa:\n/analizar {text}")
     else:
-        await update.message.reply_text(
-            "Comando no reconocido. Usa `/ayuda` para ver los comandos.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("Usa /ayuda para ver los comandos disponibles.")
+
 
 # ============================================================================
 # MAIN
@@ -377,22 +326,17 @@ async def procesar_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     keep_alive()
-
     application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start",    start))
     application.add_handler(CommandHandler("analizar", analizar))
     application.add_handler(CommandHandler("comparar", comparar))
-    application.add_handler(CommandHandler("precio", precio))
-    application.add_handler(CommandHandler("ayuda", ayuda))
+    application.add_handler(CommandHandler("precio",   precio))
+    application.add_handler(CommandHandler("ayuda",    ayuda))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_mensaje))
 
-    print("Bot iniciado")
-    print("Keep-Alive activo para UptimeRobot")
-    print("Yahoo Finance + CoinGecko listos")
-
+    print("Bot iniciado - FMP + Alpha Vantage + Finnhub + CoinGecko")
     asyncio.run(Database.init())
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == '__main__':
     main()
