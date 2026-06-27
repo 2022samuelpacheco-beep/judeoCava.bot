@@ -1,314 +1,350 @@
 import httpx
-import json
+import os
 from database import Database
 
-# ============================================================================
-# YAHOO FINANCE - Fuente principal (stocks y ETFs, 100% gratis)
-# ============================================================================
+FMP_KEY     = os.getenv("FMP_KEY", "")
+AV_KEY      = os.getenv("ALPHA_VANTAGE_KEY", "")
+FINNHUB_KEY = os.getenv("FINNHUB_KEY", "")
 
-YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
-YAHOO_QUOTE = "https://query2.finance.yahoo.com/v10/finance/quoteSummary"
+def _safe_float(val):
+    if val is None:
+        return None
+    try:
+        f = float(str(val).replace("%","").strip())
+        return f if f != 0 else None
+    except:
+        return None
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-}
+async def _get(client, url, params, timeout=15):
+    try:
+        r = await client.get(url, params=params, timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+        print(f"HTTP {r.status_code} en {url}")
+    except Exception as e:
+        print(f"Error HTTP {url}: {e}")
+    return None
 
-class Yahoo:
-    """Yahoo Finance API - Gratis, sin key, stocks y ETFs"""
+class FMP:
+    BASE = "https://financialmodelingprep.com/api/v3"
 
     @staticmethod
-    async def get_quote(symbol: str):
-        """Obtener precio actual"""
-        cached = await Database.get(symbol, "quote", max_age_minutes=15)
-        if cached:
-            return cached
-
-        try:
-            async with httpx.AsyncClient() as client:
-                url = f"{YAHOO_QUOTE}/{symbol}"
-                params = {
-                    "modules": "price,summaryDetail,defaultKeyStatistics,financialData",
-                    "crumb": ""
+    async def get_quote(symbol, client):
+        data = await _get(client, f"{FMP.BASE}/quote/{symbol}", {"apikey": FMP_KEY})
+        if data and isinstance(data, list) and data:
+            d = data[0]
+            price = _safe_float(d.get("price"))
+            if price:
+                return {
+                    "price":         price,
+                    "changePercent": _safe_float(d.get("changesPercentage")),
+                    "marketCap":     _safe_float(d.get("marketCap")),
+                    "name":          d.get("name"),
+                    "source":        "FMP",
                 }
-                response = await client.get(url, params=params, headers=HEADERS, timeout=15)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    result_data = data.get("quoteSummary", {}).get("result", [])
-
-                    if result_data:
-                        price_data = result_data[0].get("price", {})
-                        result = {
-                            "symbol": symbol,
-                            "price": price_data.get("regularMarketPrice", {}).get("raw"),
-                            "changePercent": price_data.get("regularMarketChangePercent", {}).get("raw", 0) * 100
-                            if price_data.get("regularMarketChangePercent", {}).get("raw") is not None else 0,
-                            "name": price_data.get("longName") or price_data.get("shortName", symbol),
-                            "marketCap": price_data.get("marketCap", {}).get("raw"),
-                            "currency": price_data.get("currency", "USD"),
-                        }
-                        if result["price"]:
-                            await Database.save(symbol, "quote", result)
-                            return result
-
-            # Fallback: chart endpoint más simple
-            return await Yahoo._get_quote_chart(symbol)
-
-        except Exception as e:
-            print(f"Yahoo quote error: {e}")
-            return await Yahoo._get_quote_chart(symbol)
-
-    @staticmethod
-    async def _get_quote_chart(symbol: str):
-        """Fallback usando endpoint de chart"""
-        try:
-            async with httpx.AsyncClient() as client:
-                url = f"{YAHOO_BASE}/{symbol}"
-                params = {"interval": "1d", "range": "5d"}
-                response = await client.get(url, params=params, headers=HEADERS, timeout=15)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
-
-                    price = meta.get("regularMarketPrice")
-                    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
-
-                    if price and prev_close and prev_close != 0:
-                        change_pct = ((price - prev_close) / prev_close) * 100
-                    else:
-                        change_pct = 0
-
-                    if price:
-                        result = {
-                            "symbol": symbol,
-                            "price": price,
-                            "changePercent": round(change_pct, 2),
-                            "name": meta.get("longName") or meta.get("symbol", symbol),
-                            "marketCap": None,
-                            "currency": meta.get("currency", "USD"),
-                        }
-                        await Database.save(symbol, "quote", result)
-                        return result
-        except Exception as e:
-            print(f"Yahoo chart fallback error: {e}")
         return None
 
     @staticmethod
-    async def get_key_metrics(symbol: str):
-        """Obtener métricas fundamentales"""
-        cached = await Database.get(symbol, "metrics", max_age_minutes=1440)
-        if cached:
-            return cached
+    async def get_profile(symbol, client):
+        data = await _get(client, f"{FMP.BASE}/profile/{symbol}", {"apikey": FMP_KEY})
+        if data and isinstance(data, list) and data:
+            d = data[0]
+            return {
+                "name":        d.get("companyName"),
+                "sector":      d.get("sector"),
+                "industry":    d.get("industry"),
+                "marketCap":   _safe_float(d.get("mktCap")),
+                "description": (d.get("description") or "")[:300],
+            }
+        return None
 
-        try:
-            async with httpx.AsyncClient() as client:
-                url = f"{YAHOO_QUOTE}/{symbol}"
-                params = {
-                    "modules": "defaultKeyStatistics,financialData,summaryDetail"
+    @staticmethod
+    async def get_metrics(symbol, client):
+        data = await _get(client, f"{FMP.BASE}/key-metrics/{symbol}",
+                          {"period": "annual", "limit": "1", "apikey": FMP_KEY})
+        if data and isinstance(data, list) and data:
+            d = data[0]
+            return {
+                "peRatio":       _safe_float(d.get("peRatio")),
+                "roe":           _safe_float(d.get("roe")),
+                "roa":           _safe_float(d.get("roa")),
+                "debtToEquity":  _safe_float(d.get("debtToEquity")),
+                "dividendYield": _safe_float(d.get("dividendYield")),
+                "revenueGrowth": _safe_float(d.get("revenueGrowth")),
+                "netMargin":     _safe_float(d.get("netMargin")),
+            }
+        return None
+
+    @staticmethod
+    async def get_historical(symbol, client):
+        data = await _get(client, f"{FMP.BASE}/historical-price-full/{symbol}",
+                          {"apikey": FMP_KEY}, timeout=20)
+        if data and "historical" in data:
+            hist = data["historical"]
+            parsed = [{"close": float(d["close"]), "timestamp": d.get("date")}
+                      for d in hist if d.get("close")]
+            if len(parsed) >= 50:
+                return parsed
+        return None
+
+class Finnhub:
+    BASE = "https://finnhub.io/api/v1"
+
+    @staticmethod
+    async def get_quote(symbol, client):
+        data = await _get(client, f"{Finnhub.BASE}/quote",
+                          {"symbol": symbol, "token": FINNHUB_KEY})
+        if data:
+            price = _safe_float(data.get("c"))
+            prev  = _safe_float(data.get("pc"))
+            if price:
+                change_pct = ((price - prev) / prev * 100) if prev else None
+                return {
+                    "price":         price,
+                    "changePercent": change_pct,
+                    "marketCap":     None,
+                    "name":          None,
+                    "source":        "Finnhub",
                 }
-                response = await client.get(url, params=params, headers=HEADERS, timeout=15)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    result_data = data.get("quoteSummary", {}).get("result", [])
-
-                    if result_data:
-                        stats = result_data[0].get("defaultKeyStatistics", {})
-                        fin = result_data[0].get("financialData", {})
-                        summary = result_data[0].get("summaryDetail", {})
-
-                        def raw(d, key):
-                            val = d.get(key, {})
-                            return val.get("raw") if isinstance(val, dict) else val
-
-                        result = {
-                            "peRatio": raw(summary, "trailingPE") or raw(stats, "forwardPE"),
-                            "roe": raw(fin, "returnOnEquity"),
-                            "roa": raw(fin, "returnOnAssets"),
-                            "debtToEquity": raw(fin, "debtToEquity"),
-                            "dividendYield": raw(summary, "dividendYield"),
-                            "revenueGrowth": raw(fin, "revenueGrowth"),
-                            "netMargin": raw(fin, "profitMargins"),
-                        }
-                        await Database.save(symbol, "metrics", result)
-                        return result
-        except Exception as e:
-            print(f"Yahoo metrics error: {e}")
         return None
 
     @staticmethod
-    async def get_historical_prices(symbol: str, days: int = 365):
-        """Obtener historial de precios"""
-        cached = await Database.get(symbol, f"historical_{days}", max_age_minutes=120)
-        if cached:
-            return cached
+    async def get_profile(symbol, client):
+        data = await _get(client, f"{Finnhub.BASE}/stock/profile2",
+                          {"symbol": symbol, "token": FINNHUB_KEY})
+        if data and data.get("name"):
+            mktcap_raw = _safe_float(data.get("marketCapitalization"))
+            return {
+                "name":        data.get("name"),
+                "sector":      data.get("finnhubIndustry"),
+                "industry":    data.get("finnhubIndustry"),
+                "marketCap":   mktcap_raw * 1e6 if mktcap_raw else None,
+                "description": "",
+            }
+        return None
 
-        try:
-            async with httpx.AsyncClient() as client:
-                url = f"{YAHOO_BASE}/{symbol}"
-                params = {
-                    "interval": "1d",
-                    "range": "2y",  # 2 años para tener suficientes datos para SMA200
+    @staticmethod
+    async def get_metrics(symbol, client):
+        data = await _get(client, f"{Finnhub.BASE}/stock/metric",
+                          {"symbol": symbol, "metric": "all", "token": FINNHUB_KEY})
+        if data and "metric" in data:
+            m = data["metric"]
+            roe = _safe_float(m.get("roeTTM"))
+            roa = _safe_float(m.get("roaTTM"))
+            npm = _safe_float(m.get("netProfitMarginTTM"))
+            rg  = _safe_float(m.get("revenueGrowthTTMYoy"))
+            # Finnhub devuelve ROE/ROA/margin como porcentaje (ej: 15.3), convertir a decimal
+            return {
+                "peRatio":       _safe_float(m.get("peNormalizedAnnual") or m.get("peTTM")),
+                "roe":           roe / 100 if roe else None,
+                "roa":           roa / 100 if roa else None,
+                "debtToEquity":  _safe_float(m.get("totalDebt/totalEquityAnnual")),
+                "dividendYield": _safe_float(m.get("dividendYieldIndicatedAnnual")),
+                "revenueGrowth": rg / 100 if rg else None,
+                "netMargin":     npm / 100 if npm else None,
+            }
+        return None
+
+class AlphaVantage:
+    BASE = "https://www.alphavantage.co/query"
+
+    @staticmethod
+    async def get_quote(symbol, client):
+        data = await _get(client, AlphaVantage.BASE,
+                          {"function": "GLOBAL_QUOTE", "symbol": symbol, "apikey": AV_KEY})
+        if data and "Global Quote" in data:
+            q = data["Global Quote"]
+            price = _safe_float(q.get("05. price"))
+            if price:
+                pct_str = q.get("10. change percent", "0%").replace("%", "")
+                return {
+                    "price":         price,
+                    "changePercent": _safe_float(pct_str),
+                    "marketCap":     None,
+                    "name":          None,
+                    "source":        "AlphaVantage",
                 }
-                response = await client.get(url, params=params, headers=HEADERS, timeout=20)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    result_data = data.get("chart", {}).get("result", [])
-
-                    if result_data:
-                        timestamps = result_data[0].get("timestamp", [])
-                        closes = result_data[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-
-                        historical = []
-                        for ts, close in zip(timestamps, closes):
-                            if close is not None:
-                                historical.append({"close": close, "timestamp": ts})
-
-                        if len(historical) >= 50:
-                            result = {
-                                "symbol": symbol,
-                                "historical": historical[::-1],  # más reciente primero
-                            }
-                            await Database.save(symbol, f"historical_{days}", result)
-                            return result
-        except Exception as e:
-            print(f"Yahoo historical error: {e}")
         return None
 
     @staticmethod
-    async def get_company_profile(symbol: str):
-        """Obtener perfil de la empresa"""
-        cached = await Database.get(symbol, "profile", max_age_minutes=1440)
-        if cached:
-            return cached
-
-        try:
-            async with httpx.AsyncClient() as client:
-                url = f"{YAHOO_QUOTE}/{symbol}"
-                params = {"modules": "assetProfile,price"}
-                response = await client.get(url, params=params, headers=HEADERS, timeout=15)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    result_data = data.get("quoteSummary", {}).get("result", [])
-
-                    if result_data:
-                        profile = result_data[0].get("assetProfile", {})
-                        price_d = result_data[0].get("price", {})
-
-                        result = {
-                            "name": price_d.get("longName") or price_d.get("shortName", symbol),
-                            "sector": profile.get("sector", "N/A"),
-                            "industry": profile.get("industry", "N/A"),
-                            "marketCap": price_d.get("marketCap", {}).get("raw") if isinstance(price_d.get("marketCap"), dict) else None,
-                            "description": (profile.get("longBusinessSummary", "N/A") or "N/A")[:300],
-                        }
-                        await Database.save(symbol, "profile", result)
-                        return result
-        except Exception as e:
-            print(f"Yahoo profile error: {e}")
+    async def get_overview(symbol, client):
+        data = await _get(client, AlphaVantage.BASE,
+                          {"function": "OVERVIEW", "symbol": symbol, "apikey": AV_KEY})
+        if data and data.get("Symbol"):
+            roe = _safe_float(data.get("ReturnOnEquityTTM"))
+            roa = _safe_float(data.get("ReturnOnAssetsTTM"))
+            npm = _safe_float(data.get("ProfitMargin"))
+            rg  = _safe_float(data.get("QuarterlyRevenueGrowthYOY"))
+            dy  = _safe_float(data.get("DividendYield"))
+            pe  = _safe_float(data.get("TrailingPE") or data.get("ForwardPE"))
+            d2e = _safe_float(data.get("DebtToEquityRatio"))
+            mc  = _safe_float(data.get("MarketCapitalization"))
+            return {
+                "profile": {
+                    "name":        data.get("Name"),
+                    "sector":      data.get("Sector"),
+                    "industry":    data.get("Industry"),
+                    "marketCap":   mc,
+                    "description": (data.get("Description") or "")[:300],
+                },
+                "metrics": {
+                    "peRatio":       pe,
+                    "roe":           roe,
+                    "roa":           roa,
+                    "debtToEquity":  d2e,
+                    "dividendYield": dy,
+                    "revenueGrowth": rg,
+                    "netMargin":     npm,
+                },
+            }
         return None
 
-
-# ============================================================================
-# COINGECKO - Para criptomonedas (100% gratis)
-# ============================================================================
+    @staticmethod
+    async def get_historical(symbol, client):
+        data = await _get(client, AlphaVantage.BASE,
+                          {"function": "TIME_SERIES_DAILY_ADJUSTED", "symbol": symbol,
+                           "outputsize": "full", "apikey": AV_KEY}, timeout=25)
+        if data and "Time Series (Daily)" in data:
+            ts = data["Time Series (Daily)"]
+            hist = []
+            for date_str, vals in ts.items():
+                close = _safe_float(vals.get("5. adjusted close") or vals.get("4. close"))
+                if close:
+                    hist.append({"close": close, "timestamp": date_str})
+            if len(hist) >= 50:
+                return hist
+        return None
 
 CRYPTO_MAP = {
-    "BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin",
-    "SOL": "solana", "ADA": "cardano", "XRP": "ripple",
-    "DOGE": "dogecoin", "DOT": "polkadot", "AVAX": "avalanche-2",
+    "BTC": "bitcoin",   "ETH": "ethereum",    "BNB": "binancecoin",
+    "SOL": "solana",    "ADA": "cardano",      "XRP": "ripple",
+    "DOGE": "dogecoin", "DOT": "polkadot",     "AVAX": "avalanche-2",
     "MATIC": "matic-network", "LTC": "litecoin", "LINK": "chainlink",
-    "UNI": "uniswap", "ATOM": "cosmos", "XLM": "stellar",
+    "UNI": "uniswap",  "ATOM": "cosmos",      "XLM": "stellar",
+    "TRX": "tron",     "NEAR": "near",        "SHIB": "shiba-inu",
 }
+CRYPTO_SYMBOLS = set(CRYPTO_MAP.keys())
+
+def is_crypto(symbol: str) -> bool:
+    return symbol.upper() in CRYPTO_SYMBOLS
 
 class CoinGecko:
-    """CoinGecko API - Cripto gratis"""
-    BASE_URL = "https://api.coingecko.com/api/v3"
+    BASE = "https://api.coingecko.com/api/v3"
 
     @staticmethod
-    def get_coin_id(symbol: str) -> str:
-        """Convertir símbolo a ID de CoinGecko"""
+    def _id(symbol):
         return CRYPTO_MAP.get(symbol.upper(), symbol.lower())
 
     @staticmethod
-    async def get_quote(symbol: str):
-        """Precio de cripto"""
-        coin_id = CoinGecko.get_coin_id(symbol)
-        cached = await Database.get(f"CRYPTO_{symbol}", "quote", max_age_minutes=10)
+    async def get_quote(symbol):
+        coin_id = CoinGecko._id(symbol)
+        cached = await Database.get(f"CG_{symbol}", "quote", max_age_minutes=10)
         if cached:
             return cached
-
         try:
             async with httpx.AsyncClient() as client:
-                url = f"{CoinGecko.BASE_URL}/simple/price"
-                params = {
-                    "ids": coin_id,
-                    "vs_currencies": "usd",
-                    "include_24hr_change": "true",
-                    "include_market_cap": "true",
-                }
-                response = await client.get(url, params=params, timeout=10)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    if coin_id in data:
-                        d = data[coin_id]
-                        result = {
-                            "symbol": symbol.upper(),
-                            "price": d.get("usd"),
-                            "changePercent": d.get("usd_24h_change", 0),
-                            "name": symbol.upper(),
-                            "marketCap": d.get("usd_market_cap"),
-                            "currency": "USD",
-                        }
-                        await Database.save(f"CRYPTO_{symbol}", "quote", result)
+                data = await _get(client, f"{CoinGecko.BASE}/simple/price", {
+                    "ids": coin_id, "vs_currencies": "usd",
+                    "include_24hr_change": "true", "include_market_cap": "true",
+                })
+                if data and coin_id in data:
+                    d = data[coin_id]
+                    result = {
+                        "price":         _safe_float(d.get("usd")),
+                        "changePercent": _safe_float(d.get("usd_24h_change")),
+                        "marketCap":     _safe_float(d.get("usd_market_cap")),
+                        "name":          symbol.upper(),
+                        "sector":        "Cripto",
+                    }
+                    if result["price"]:
+                        await Database.save(f"CG_{symbol}", "quote", result)
                         return result
         except Exception as e:
-            print(f"CoinGecko error: {e}")
+            print(f"CoinGecko quote error: {e}")
         return None
 
     @staticmethod
-    async def get_historical_prices(symbol: str, days: int = 365):
-        """Historial de precios de cripto"""
-        coin_id = CoinGecko.get_coin_id(symbol)
-        cached = await Database.get(f"CRYPTO_{symbol}", "historical_365", max_age_minutes=120)
+    async def get_historical(symbol):
+        coin_id = CoinGecko._id(symbol)
+        cached = await Database.get(f"CG_{symbol}", "historical", max_age_minutes=120)
         if cached:
             return cached
-
         try:
             async with httpx.AsyncClient() as client:
-                url = f"{CoinGecko.BASE_URL}/coins/{coin_id}/market_chart"
-                params = {"vs_currency": "usd", "days": "730", "interval": "daily"}
-                response = await client.get(url, params=params, timeout=15)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    prices = data.get("prices", [])
-                    historical = [{"close": p[1], "timestamp": p[0] // 1000} for p in prices]
-
-                    if len(historical) >= 50:
-                        result = {
-                            "symbol": symbol.upper(),
-                            "historical": historical[::-1],
-                        }
-                        await Database.save(f"CRYPTO_{symbol}", "historical_365", result)
-                        return result
+                data = await _get(client, f"{CoinGecko.BASE}/coins/{coin_id}/market_chart",
+                                  {"vs_currency": "usd", "days": "730", "interval": "daily"},
+                                  timeout=20)
+                if data and "prices" in data:
+                    hist = [{"close": p[1], "timestamp": p[0]//1000}
+                            for p in data["prices"] if p[1]]
+                    if len(hist) >= 50:
+                        hist_desc = hist[::-1]
+                        await Database.save(f"CG_{symbol}", "historical", hist_desc)
+                        return hist_desc
         except Exception as e:
             print(f"CoinGecko historical error: {e}")
         return None
 
+class StockAPI:
+    """Orquesta FMP -> Finnhub/AV con cache SQLite."""
 
-# ============================================================================
-# DETECTOR: ¿stock o cripto?
-# ============================================================================
+    @staticmethod
+    async def get_all(symbol: str) -> dict:
+        cached = await Database.get(symbol, "all_data", max_age_minutes=60)
+        if cached:
+            print(f"[CACHE] {symbol}")
+            return cached
 
-CRYPTO_SYMBOLS = set(CRYPTO_MAP.keys()) | {
-    "USDT", "USDC", "BUSD", "SHIB", "TRX", "TON", "NEAR", "ICP", "VET",
-}
+        result = {"quote": None, "profile": None, "metrics": None, "historical": None}
 
-def is_crypto(symbol: str) -> bool:
-    return symbol.upper() in CRYPTO_SYMBOLS
+        async with httpx.AsyncClient() as client:
+            # QUOTE: FMP -> Finnhub -> AV
+            print(f"[API] {symbol}: quote...")
+            result["quote"] = (
+                await FMP.get_quote(symbol, client) or
+                await Finnhub.get_quote(symbol, client) or
+                await AlphaVantage.get_quote(symbol, client)
+            )
+
+            # OVERVIEW AV: un solo request da perfil + metricas
+            print(f"[API] {symbol}: overview/metricas...")
+            av = await AlphaVantage.get_overview(symbol, client)
+            if av:
+                result["profile"] = av["profile"]
+                result["metrics"] = av["metrics"]
+            else:
+                result["profile"] = (
+                    await FMP.get_profile(symbol, client) or
+                    await Finnhub.get_profile(symbol, client)
+                )
+                result["metrics"] = (
+                    await FMP.get_metrics(symbol, client) or
+                    await Finnhub.get_metrics(symbol, client)
+                )
+
+            # Completar marketCap cruzando fuentes
+            if result["profile"] and not result["profile"].get("marketCap"):
+                mc = (result["quote"] or {}).get("marketCap")
+                if mc:
+                    result["profile"]["marketCap"] = mc
+            if result["quote"] and not result["quote"].get("name"):
+                name = (result["profile"] or {}).get("name")
+                if name:
+                    result["quote"]["name"] = name
+
+            # HISTORICAL: FMP -> AV (Finnhub no tiene endpoint de historico gratis)
+            print(f"[API] {symbol}: historico...")
+            result["historical"] = (
+                await FMP.get_historical(symbol, client) or
+                await AlphaVantage.get_historical(symbol, client)
+            )
+
+        if result["quote"]:
+            await Database.save(symbol, "all_data", result)
+
+        q_src  = (result["quote"] or {}).get("source", "FALLO")
+        hist_n = len(result["historical"]) if result["historical"] else 0
+        has_m  = any(v is not None for v in (result["metrics"] or {}).values())
+        print(f"[OK] {symbol}: quote={q_src}, metrics={'si' if has_m else 'no'}, hist={hist_n}d")
+
+        return result
